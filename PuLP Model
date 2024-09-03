@@ -1,0 +1,64 @@
+import pandas as pd
+from pulp import LpProblem, LpVariable, lpSum, LpMaximize
+
+# Load the data
+miners_df = pd.read_csv('miners_issues.csv')
+workers_df = pd.read_csv('workers.csv')
+
+# Initialize the problem
+problem = LpProblem("Maintenance_Prioritization", LpMaximize)
+
+# Define variables
+miner_ids = miners_df['MinerID'].tolist()
+worker_ids = workers_df['WorkerID'].tolist()
+
+# Create binary variables for assigning miners to workers
+assign_vars = LpVariable.dicts("Assign", (miner_ids, worker_ids), cat='Binary')
+
+# Create continuous variables for overtime hours (not used in this model)
+overtime_vars = LpVariable.dicts("Overtime", worker_ids, lowBound=0, cat='Continuous')
+
+# Objective: Maximize total revenue recovered
+problem += lpSum(assign_vars[m][w] * miners_df.loc[miners_df['MinerID'] == m, 'RevenueLossPerDay'].values[0] for m in miner_ids for w in worker_ids)
+
+# Constraints
+# Each miner must be assigned to exactly one worker
+for m in miner_ids:
+    problem += lpSum(assign_vars[m][w] for w in worker_ids) == 1
+
+# Ensure each worker works on a maximum of 10 miners
+for w in worker_ids:
+    problem += lpSum(assign_vars[m][w] for m in miner_ids) <= 10
+
+# Calculate effective cost per hour for each worker including efficiency factor
+workers_df['EffectiveCostPerHour'] = workers_df['CostPerHour'] / workers_df['Efficiency']
+
+# Total cost calculation including overtime pay at 1.5 times the normal wage
+total_cost_var = LpVariable("TotalCost", lowBound=0, cat='Continuous')
+problem += total_cost_var == lpSum(assign_vars[m][w] * workers_df.loc[workers_df['WorkerID'] == w, 'EffectiveCostPerHour'].values[0] * miners_df.loc[miners_df['MinerID'] == m, 'HoursToFix'].values[0] for m in miner_ids for w in worker_ids)
+
+# Solve the problem
+problem.solve()
+
+# Create output dataframe
+output = []
+for w in worker_ids:
+    assigned_miners = [m for m in miner_ids if assign_vars[m][w].varValue == 1]
+    # Limit to top 10 miners if more than 10 are assigned
+    assigned_miners = sorted(assigned_miners, key=lambda m: miners_df.loc[miners_df['MinerID'] == m, 'RevenueLossPerDay'].values[0], reverse=True)[:10]
+    output.append((w, assigned_miners))
+
+# Save output to CSV
+output_df = pd.DataFrame(output, columns=['WorkerID', 'AssignedMiners'])
+output_df['AssignedMiners'] = output_df['AssignedMiners'].apply(lambda x: ','.join(map(str, x)))
+output_df.to_csv('worker_assignments.csv', index=False)
+
+# Output the results
+print("Optimal Maintenance Schedule Today:")
+for w, miners in output:
+    print(f"Worker {w} should focus on miners: {', '.join(map(str, miners))}")
+
+print(f"Total daily revenue recovered: ${problem.objective.value():,.2f}")
+print(f"Total cost of maintenance: ${total_cost_var.value():,.2f}")
+
+
